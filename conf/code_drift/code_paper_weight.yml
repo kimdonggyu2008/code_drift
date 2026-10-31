@@ -1,0 +1,4 @@
+$include:
+  - conf/code_drift/code.yml
+# Paper coefficient; needs validation when transferring to a different checkpoint/data.
+code_drift.weight: 100.0

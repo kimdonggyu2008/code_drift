@@ -19,6 +19,7 @@ from audiotools.ml.decorators import when
 from torch.utils.tensorboard import SummaryWriter
 
 import dac
+from dac.nn.codedrift import CodeDriftConfig
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -56,6 +57,13 @@ tfm = argbind.bind_module(transforms, "train", "val", filter_fn=filter_fn)
 # Loss
 filter_fn = lambda fn: hasattr(fn, "forward") and "Loss" in fn.__name__
 losses = argbind.bind_module(dac.nn.loss, filter_fn=filter_fn)
+
+
+@argbind.bind()
+def code_drift(enabled: bool = False, loss: str = "none", weight: float = 0.0,
+               scope: str = "both"):
+    """Opt-in fine-tuning; scope controls E/D updates and always freezes RVQ."""
+    return CodeDriftConfig(enabled, loss, weight, scope)
 
 
 def get_infinite_loader(dataloader):
@@ -119,6 +127,7 @@ class State:
     val_data: AudioDataset
 
     tracker: Tracker
+    code_drift: CodeDriftConfig
 
 
 @argbind.bind(without_prefix=True)
@@ -130,7 +139,16 @@ def load(
     resume: bool = False,
     tag: str = "latest",
     load_weights: bool = False,
+    pretrained_generator: str = "",
+    pretrained_discriminator: str = "",
 ):
+    drift = code_drift()
+    if resume and (pretrained_generator or pretrained_discriminator):
+        raise ValueError("Choose resume OR pretrained weights, not both")
+    if load_weights and not resume:
+        raise ValueError("load_weights requires resume; otherwise use pretrained_generator")
+    if drift.enabled and not (resume or pretrained_generator):
+        raise ValueError("Code Drift fine-tuning requires a pretrained generator or resume")
     generator, g_extra = None, {}
     discriminator, d_extra = None, {}
 
@@ -139,15 +157,35 @@ def load(
             "folder": f"{save_path}/{tag}",
             "map_location": "cpu",
             "package": not load_weights,
+            "strict": True,
+            "weights_only": False,  # trusted local optimizer/tracker checkpoints
         }
         tracker.print(f"Resuming from {str(Path('.').absolute())}/{kwargs['folder']}")
         if (Path(kwargs["folder"]) / "dac").exists():
             generator, g_extra = DAC.load_from_folder(**kwargs)
         if (Path(kwargs["folder"]) / "discriminator").exists():
             discriminator, d_extra = Discriminator.load_from_folder(**kwargs)
+        if generator is None or discriminator is None:
+            raise FileNotFoundError("Resume requires both dac/ and discriminator/ checkpoints")
+        if load_weights:
+            g_extra, d_extra = {}, {}
+        else:
+            drift.check_resume(g_extra.get("metadata.pth", {}))
+
+    if pretrained_generator:
+        generator = DAC.load(pretrained_generator, strict=True)
+    if pretrained_discriminator:
+        discriminator = Discriminator.load(pretrained_discriminator, strict=True)
+    if drift.enabled and discriminator is None:
+        tracker.print("Code Drift: no pretrained discriminator supplied; initializing a new discriminator.")
 
     generator = DAC() if generator is None else generator
-    discriminator = Discriminator() if discriminator is None else discriminator
+    discriminator = (Discriminator(sample_rate=generator.sample_rate)
+                     if discriminator is None else discriminator)
+    drift.configure(generator)
+    for module in discriminator.modules():
+        if hasattr(module, "sample_rate") and module.sample_rate != generator.sample_rate:
+            raise ValueError("Generator and discriminator sample rates must match")
 
     tracker.print(generator)
     tracker.print(discriminator)
@@ -156,7 +194,9 @@ def load(
     discriminator = accel.prepare_model(discriminator)
 
     with argbind.scope(args, "generator"):
-        optimizer_g = AdamW(generator.parameters(), use_zero=accel.use_ddp)
+        optimizer_g = AdamW(
+            [p for p in generator.parameters() if p.requires_grad], use_zero=accel.use_ddp
+        )
         scheduler_g = ExponentialLR(optimizer_g)
     with argbind.scope(args, "discriminator"):
         optimizer_d = AdamW(discriminator.parameters(), use_zero=accel.use_ddp)
@@ -199,6 +239,7 @@ def load(
         tracker=tracker,
         train_data=train_data,
         val_data=val_data,
+        code_drift=drift,
     )
 
 
@@ -211,20 +252,25 @@ def val_loop(batch, state, accel):
         batch["signal"].clone(), **batch["transform_args"]
     )
 
-    out = state.generator(signal.audio_data, signal.sample_rate)
+    out = state.generator(signal.audio_data, signal.sample_rate,
+                          **state.code_drift.forward_kwargs())
     recons = AudioSignal(out["audio"], signal.sample_rate)
 
-    return {
+    output = {
         "loss": state.mel_loss(recons, signal),
         "mel/loss": state.mel_loss(recons, signal),
         "stft/loss": state.stft_loss(recons, signal),
         "waveform/loss": state.waveform_loss(recons, signal),
     }
+    if "codedrift/loss" in out:
+        output["codedrift/" + state.code_drift.loss] = out["codedrift/loss"].mean()
+    return output
 
 
 @timer()
 def train_loop(state, batch, accel, lambdas):
     state.generator.train()
+    state.code_drift.train_mode(accel.unwrap(state.generator))
     state.discriminator.train()
     output = {}
 
@@ -235,7 +281,8 @@ def train_loop(state, batch, accel, lambdas):
         )
 
     with accel.autocast():
-        out = state.generator(signal.audio_data, signal.sample_rate)
+        out = state.generator(signal.audio_data, signal.sample_rate,
+                              **state.code_drift.forward_kwargs())
         recons = AudioSignal(out["audio"], signal.sample_rate)
         commitment_loss = out["vq/commitment_loss"]
         codebook_loss = out["vq/codebook_loss"]
@@ -263,6 +310,13 @@ def train_loop(state, batch, accel, lambdas):
         output["vq/commitment_loss"] = commitment_loss
         output["vq/codebook_loss"] = codebook_loss
         output["loss"] = sum([v * output[k] for k, v in lambdas.items() if k in output])
+        # Keep ALL original configured DAC terms; add exactly one auxiliary term.
+        if state.code_drift.enabled:
+            output["codedrift/base_loss"] = output["loss"]
+            raw = out.get("codedrift/loss", output["loss"].new_zeros(())).mean()
+            output["codedrift/" + state.code_drift.loss] = raw
+            output["codedrift/weighted_loss"] = state.code_drift.weight * raw
+            output["loss"] = output["loss"] + output["codedrift/weighted_loss"]
 
     state.optimizer_g.zero_grad()
     accel.backward(output["loss"])
@@ -281,21 +335,24 @@ def train_loop(state, batch, accel, lambdas):
 
 
 def checkpoint(state, save_iters, save_path):
-    metadata = {"logs": state.tracker.history}
+    completed = state.tracker.step + 1
+    metadata = {"logs": state.tracker.history, "code_drift": state.code_drift.to_dict(),
+                "completed_updates": completed}
 
     tags = ["latest"]
     state.tracker.print(f"Saving to {str(Path('.').absolute())}")
     if state.tracker.is_best("val", "mel/loss"):
         state.tracker.print(f"Best generator so far")
         tags.append("best")
-    if state.tracker.step in save_iters:
-        tags.append(f"{state.tracker.step // 1000}k")
+    if completed in save_iters:
+        tags.append(f"{completed // 1000}k")
 
     for tag in tags:
         generator_extra = {
             "optimizer.pth": state.optimizer_g.state_dict(),
             "scheduler.pth": state.scheduler_g.state_dict(),
-            "tracker.pth": state.tracker.state_dict(),
+            # Save the NEXT iteration, so resume does not repeat the saved update.
+            "tracker.pth": {**state.tracker.state_dict(), "step": completed},
             "metadata.pth": metadata,
         }
         accel.unwrap(state.generator).metadata = metadata
@@ -379,6 +436,11 @@ def train(
     )
 
     state = load(args, accel, tracker, save_path)
+    if accel.local_rank == 0:
+        argbind.dump_args(args, Path(save_path) / "args.yml")
+    if num_iters is not None and state.tracker.step >= num_iters:
+        tracker.print("Requested updates are already complete.")
+        return
     train_dataloader = accel.prepare_dataloader(
         state.train_data,
         start_idx=state.tracker.step * batch_size,
@@ -416,10 +478,11 @@ def train(
             last_iter = (
                 tracker.step == num_iters - 1 if num_iters is not None else False
             )
-            if tracker.step % sample_freq == 0 or last_iter:
+            completed = tracker.step + 1
+            if completed % sample_freq == 0 or last_iter:
                 save_samples(state, val_idx, writer)
 
-            if tracker.step % valid_freq == 0 or last_iter:
+            if completed % valid_freq == 0 or last_iter:
                 validate(state, val_dataloader, accel)
                 checkpoint(state, save_iters, save_path)
                 # Reset validation progress bar, print summary since last validation.

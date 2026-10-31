@@ -270,6 +270,7 @@ class DAC(BaseModel, CodecMixin):
         audio_data: torch.Tensor,
         sample_rate: int = None,
         n_quantizers: int = None,
+        code_drift_loss: str = "none",
     ):
         """Model forward pass
 
@@ -283,6 +284,9 @@ class DAC(BaseModel, CodecMixin):
         n_quantizers : int, optional
             Number of quantizers to use, by default None.
             If None, all quantizers are used.
+        code_drift_loss : str, optional
+            Training-only auxiliary objective: none (original path), enc, proj,
+            or code. Active objectives also return "codedrift/loss".
 
         Returns
         -------
@@ -305,6 +309,13 @@ class DAC(BaseModel, CodecMixin):
             "audio" : Tensor[B x 1 x length]
                 Decoded audio data.
         """
+        if code_drift_loss != "none":
+            from dac.nn.codedrift import forward_with_code_drift
+
+            return forward_with_code_drift(
+                self, audio_data, sample_rate, n_quantizers, code_drift_loss
+            )
+
         length = audio_data.shape[-1]
         audio_data = self.preprocess(audio_data, sample_rate)
         z, codes, latents, commitment_loss, codebook_loss = self.encode(

@@ -1,0 +1,29 @@
+# Matched fine-tuning control: same frozen RVQ as the loss arms, no auxiliary loss.
+$include:
+  - conf/final/44khz.yml
+
+code_drift.enabled: true
+code_drift.loss: none
+code_drift.weight: 0.0
+code_drift.scope: both
+
+num_iters: 50000
+batch_size: 4
+val_batch_size: 4
+num_workers: 4
+valid_freq: 1000
+sample_freq: 1000
+save_iters: [10000, 25000, 50000]  # completed optimizer updates
+val_idx: [0]
+val/AudioDataset.n_examples: 32
+
+# Replace these with your own disjoint training and validation folders.
+# Keep the SAME data/crops/seed/batch budget for base and loss comparisons.
+train/build_dataset.folders:
+  speech: [data/train/speech]
+  music: [data/train/music]
+  environment: [data/train/environment]
+val/build_dataset.folders:
+  speech: [data/val/speech]
+  music: [data/val/music]
+  environment: [data/val/environment]

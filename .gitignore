@@ -174,3 +174,12 @@ archived/
 encoded_out/
 recon/
 recons/
+
+# Local Code Drift data, checkpoints, and credentials
+data/
+checkpoints/
+*.pt
+*.ckpt
+wandb/
+.env.*
+*.netrc

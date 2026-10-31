@@ -1,0 +1,37 @@
+{
+  "kind": "software_equivalence_not_scientific_result",
+  "device": "cpu",
+  "input": "synthetic 220 Hz sine, 16758 samples, 44100 Hz",
+  "model": "official DAC 44.1kHz 8kbps 0.0.1",
+  "reference_sources": {
+    "codedrift_matched_training.py": "5741dfc96ffa3f41b6ef955e2b4d26a558342442c3fce40ec082adb69bf200e7",
+    "run_e56_codedrift_open_dac44_v2.py": "30aee5e22dcadfe011723441237d9f6e5fcbc51dbdfe880efc6cd9225984e12b"
+  },
+  "results": {
+    "enc": {
+      "loss": 6.409355163574219,
+      "difference_vs_existing_loss": 0.0,
+      "audio_exact": true,
+      "codes_exact": true
+    },
+    "proj": {
+      "loss": 6.8090386390686035,
+      "difference_vs_existing_loss": 0.0,
+      "audio_exact": true,
+      "codes_exact": true
+    },
+    "code": {
+      "loss": 15.171764373779297,
+      "difference_vs_existing_loss": 0.0,
+      "audio_exact": true,
+      "codes_exact": true
+    }
+  },
+  "versions": {
+    "torch": "2.7.1+cu128",
+    "torchaudio": "2.7.1+cu128",
+    "descript-audiotools": "0.7.2",
+    "argbind": "0.3.9",
+    "numpy": "2.1.2"
+  }
+}

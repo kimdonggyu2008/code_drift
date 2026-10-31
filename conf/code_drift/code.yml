@@ -1,0 +1,5 @@
+$include:
+  - conf/code_drift/base.yml
+code_drift.loss: code
+# Explicit local starting value. The paper's L_code coefficient is 100, not 1.
+code_drift.weight: 1.0

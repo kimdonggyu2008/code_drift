@@ -199,6 +199,9 @@ class Discriminator(ml.BaseModel):
         """
         super().__init__()
         discs = []
+        # BaseModel.save reads these attributes to reconstruct weights-only files.
+        self.rates, self.periods, self.fft_sizes = rates, periods, fft_sizes
+        self.sample_rate, self.bands = sample_rate, bands
         discs += [MPD(p) for p in periods]
         discs += [MSD(r, sample_rate=sample_rate) for r in rates]
         discs += [MRD(f, sample_rate=sample_rate, bands=bands) for f in fft_sizes]

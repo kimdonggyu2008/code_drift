@@ -1,0 +1,4 @@
+$include:
+  - conf/code_drift/base.yml
+code_drift.loss: enc
+code_drift.weight: 1.0
