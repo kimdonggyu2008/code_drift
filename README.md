@@ -1,126 +1,191 @@
-# Code Drift losses on official DAC
+> This fork adds an unofficial implementation of [Code Drift](https://arxiv.org/abs/2410.11025v2) losses (`enc`, `proj`, `code`) to DAC training. [Implementation](docs/implementation.md) | [Configs](conf/code_drift/)
 
-공식 [Descript Audio Codec](https://github.com/descriptinc/descript-audio-codec)의
-`scripts/train.py`에 **기존 DAC 손실 + 선택한 Code Drift 손실 하나**를 연결했습니다.
-Code Drift 저자의 공식 코드가 아니라 논문 §IV에 대한 구현입니다.
-공식 DAC 설명은 [README_DAC.md](README_DAC.md), 원본 버전은 [UPSTREAM.md](UPSTREAM.md)에 있습니다.
+# Descript Audio Codec (.dac): High-Fidelity Audio Compression with Improved RVQGAN
 
-## 먼저 볼 파일
+This repository contains training and inference scripts
+for the Descript Audio Codec (.dac), a high fidelity general
+neural audio codec, introduced in the paper titled **High-Fidelity Audio Compression with Improved RVQGAN**.
 
-| 파일 | 역할 |
-|---|---|
-| [scripts/train.py](scripts/train.py) | 공식 학습 루프, 손실 합산, 학습 대상 선택, 저장·재개 |
-| [dac/nn/codedrift.py](dac/nn/codedrift.py) | `enc / proj / code` 수식, RVQ 동결, 왕복 경로 |
-| [dac/model/dac.py](dac/model/dac.py) | 선택적인 학습용 forward 분기. 파라미터 구조는 동일 |
-| [dac/nn/quantize.py](dac/nn/quantize.py) | 수정하지 않은 공식 RVQ: 검색·residual·STE |
-| [conf/code_drift](conf/code_drift) | 대조군과 손실별 fine-tuning 예시 설정 |
-| [docs/implementation.md](docs/implementation.md) | 수식↔코드, gradient, 원 논문과 구현 선택의 구별 |
-| [docs/validation.md](docs/validation.md) | 실제 검사와 검증 범위 |
+![](https://static.arxiv.org/static/browse/0.3.4/images/icons/favicon-16x16.png) [arXiv Paper: High-Fidelity Audio Compression with Improved RVQGAN
+](http://arxiv.org/abs/2306.06546) <br>
+📈 [Demo Site](https://descript.notion.site/Descript-Audio-Codec-11389fce0ce2419891d6591a68f814d5)<br>
+⚙ [Model Weights](https://github.com/descriptinc/descript-audio-codec/releases/download/0.0.1/weights.pth)
 
-## 설치
+👉 With Descript Audio Codec, you can compress **44.1 KHz audio** into discrete codes at a **low 8 kbps bitrate**.  <br>
+🤌 That's approximately **90x compression** while maintaining exceptional fidelity and minimizing artifacts.  <br>
+💪 Our universal model works on all domains (speech, environment, music, etc.), making it widely applicable to generative modeling of all audio.  <br>
+👌 It can be used as a drop-in replacement for EnCodec for all audio language modeling applications (such as AudioLMs, MusicLMs, MusicGen, etc.) <br>
 
-새 환경에서 설치합니다. 기존 연구 환경의 `dac` 설치를 덮어쓸 필요는 없습니다.
-Python 3.10, PyTorch/torchaudio 2.7.1에서 CPU 검사를 수행했습니다.
-PyTorch/torchaudio는 사용하는 GPU에 맞는 동일 버전 조합을 먼저 설치합니다.
+<p align="center">
+<img src="./assets/comparsion_stats.png" alt="Comparison of compressions approaches. Our model achieves a higher compression factor compared to all baseline methods. Our model has a ~90x compression factor compared to 32x compression factor of EnCodec and 64x of SoundStream. Note that we operate at a target bitrate of 8 kbps, whereas EnCodec operates at 24 kbps and SoundStream at 6 kbps. We also operate at 44.1 kHz, whereas EnCodec operates at 48 kHz and SoundStream operates at 24 kHz." width=35%></p>
 
+
+## Usage
+
+### Installation
+```
+pip install descript-audio-codec
+```
+OR
+
+```
+pip install git+https://github.com/descriptinc/descript-audio-codec
+```
+
+### Weights
+Weights are released as part of this repo under MIT license.
+We release weights for models that can natively support 16 kHz, 24kHz, and 44.1kHz sampling rates.
+Weights are automatically downloaded when you first run `encode` or `decode` command. You can cache them using one of the following commands
 ```bash
-git clone https://github.com/kimdonggyu2008/code_drift.git
-cd code_drift
-python -m venv .venv
-source .venv/bin/activate
-# Install a matching torch/torchaudio build for your machine first.
-pip install -e .
-pip install tensorboard pytest
+python3 -m dac download # downloads the default 44kHz variant
+python3 -m dac download --model_type 44khz # downloads the 44kHz variant
+python3 -m dac download --model_type 24khz # downloads the 24kHz variant
+python3 -m dac download --model_type 16khz # downloads the 16kHz variant
+```
+We provide a Dockerfile that installs all required dependencies for encoding and decoding. The build process caches the default model weights inside the image. This allows the image to be used without an internet connection. [Please refer to instructions below.](#docker-image)
+
+
+### Compress audio
+```
+python3 -m dac encode /path/to/input --output /path/to/output/codes
 ```
 
-## 학습
+This command will create `.dac` files with the same name as the input files.
+It will also preserve the directory structure relative to input root and
+re-create it in the output directory. Please use `python -m dac encode --help`
+for more options.
 
-`conf/code_drift/base.yml`의 `train/build_dataset.folders`와 `val/build_dataset.folders`를
-실제 데이터 경로로 바꿉니다. 예시 경로에 데이터는 없습니다. G와 D는 가능하면
-**같은 사전학습 실행에서 저장한 가중치**로 시작합니다.
-
-```bash
-CUDA_VISIBLE_DEVICES=0 python -m scripts.train --args.load conf/code_drift/code.yml --pretrained_generator checkpoints/generator/weights.pth --pretrained_discriminator checkpoints/discriminator/weights.pth --code_drift.scope both --save_path runs/ed-code-lambda1
+### Reconstruct audio from compressed codes
+```
+python3 -m dac decode /path/to/output/codes --output /path/to/reconstructed_input
 ```
 
-Generator는 공식 DAC `weights.pth` 형식(`state_dict`, `metadata`)을 받습니다.
-공식 공개 G만 있다면 `--pretrained_discriminator`를 생략할 수 있지만 D는 새로 초기화되며
-시작 로그에 표시됩니다. 별도의 D warm-up을 자동으로 수행하지 않습니다. 이 조건을 저자의
-사전학습 G+D에서 연속 학습한 조건과 같다고 간주하지 않습니다.
+This command will create `.wav` files with the same name as the input files.
+It will also preserve the directory structure relative to input root and
+re-create it in the output directory. Please use `python -m dac decode --help`
+for more options.
 
-| 비교 | 설정 파일 | 추가 손실 계수 |
-|---|---|---:|
-| Base 대조군 | `conf/code_drift/base.yml` | 0 |
-| Encoder consistency | `conf/code_drift/enc.yml` | 1 |
-| Projected consistency | `conf/code_drift/proj.yml` | 10 |
-| Code consistency, 로컬 시작값 | `conf/code_drift/code.yml` | 1 |
-| Code consistency, 논문 계수 | `conf/code_drift/code_paper_weight.yml` | 100 |
+### Programmatic Usage
+```py
+import dac
+from audiotools import AudioSignal
 
-계수는 `--code_drift.weight 0.1`처럼 변경합니다. `code.yml`의 1은 논문 계수 100과
-구분한 로컬 시작값입니다. 특정 checkpoint·데이터에서 품질을 유지하는 값은 검증해야 합니다.
+# Download a model
+model_path = dac.utils.download(model_type="44khz")
+model = dac.DAC.load(model_path)
 
-학습 대상은 `--code_drift.scope encoder`, `decoder`, `both`입니다. 세 경우 모두
-**RVQ의 in_proj·embedding·out_proj를 고정**하고 dropout을 끕니다. Discriminator는 모두
-학습합니다. 각 범위마다 Base와 Code를 짝지어 같은 G/D 출발점, 데이터, seed, 학습량으로 비교합니다.
+model.to('cuda')
 
-기본 예시는 44.1 kHz, 9 codebooks, batch 4, 50,000 updates입니다. 원래 DAC의
-0.38초 학습 crop, 전처리, 손실 설정을 상속합니다. 원래 DAC 학습은 기존
-`conf/final/44khz.yml`로 실행합니다. `code_drift.enabled`의 기본값은 false이므로
-RVQ도 원래 방식으로 학습됩니다. `scripts/train_no_adv.py`에는 새 기능을 넣지 않았습니다.
+# Load audio signal file
+signal = AudioSignal('input.wav')
 
-## 기존 음질 손실
+# Encode audio signal as one long file
+# (may run out of GPU memory on long files)
+signal.to(model.device)
 
-예시 설정의 generator 목적함수는 다음과 같습니다.
+x = model.preprocess(signal.audio_data, signal.sample_rate)
+z, codes, latents, _, _ = model.encode(x)
 
-```text
-15 * mel + 1 * adversarial + 2 * feature_matching
- + 0.25 * commitment + 1 * codebook
- + lambda * selected_Code_Drift_loss
+# Decode audio signal
+y = model.decode(z)
+
+# Alternatively, use the `compress` and `decompress` functions
+# to compress long files.
+
+signal = signal.cpu()
+x = model.compress(signal)
+
+# Save and load to and from disk
+x.save("compressed.dac")
+x = dac.DACFile.load("compressed.dac")
+
+# Decompress it back to an AudioSignal
+y = model.decompress(x)
+
+# Write to file
+y.write('output.wav')
 ```
 
-RVQ가 고정되면 codebook loss는 계산·기록되지만 frozen codebook을 갱신하지 않습니다.
-PESQ는 학습 목적함수에 직접 들어가지 않습니다. STFT/waveform loss도 공식 trainer처럼
-기록하지만, `lambdas`에 없는 항목은 최적화 합계에 넣지 않습니다.
+### Docker image
+We provide a dockerfile to build a docker image with all the necessary
+dependencies.
+1. Building the image.
+    ```
+    docker build -t dac .
+    ```
+2. Using the image.
 
-TensorBoard에 원래 항목과 `codedrift/base_loss`, 선택한 raw loss,
-`codedrift/weighted_loss`, 최종 `loss`가 따로 기록됩니다.
+    Usage on CPU:
+    ```
+    docker run dac <command>
+    ```
 
-```bash
-tensorboard --logdir runs
+    Usage on GPU:
+    ```
+    docker run --gpus=all dac <command>
+    ```
+
+    `<command>` can be one of the compression and reconstruction commands listed
+    above. For example, if you want to run compression,
+
+    ```
+    docker run --gpus=all dac python3 -m dac encode ...
+    ```
+
+
+## Training
+The baseline model configuration can be trained using the following commands.
+
+### Pre-requisites
+Please install the correct dependencies
+```
+pip install -e ".[dev]"
 ```
 
-## 중단 후 재개
+## Environment setup
 
-동일한 설정·범위·계수·`save_path`를 사용하고, 최초 가중치 옵션 대신 `--resume`를 붙입니다.
-`num_iters`는 **추가 횟수가 아닌 전체 목표 update 수**입니다.
+We have provided a Dockerfile and docker compose setup that makes running experiments easy.
 
-```bash
-CUDA_VISIBLE_DEVICES=0 python -m scripts.train --args.load conf/code_drift/code.yml --code_drift.scope both --save_path runs/ed-code-lambda1 --num_iters 50000 --resume
+To build the docker image do:
+
+```
+docker compose build
 ```
 
-검증 시점과 마지막 update에 `latest/`, 필요시 `best/`, `10k/25k/50k/`를 저장합니다.
-G/D, 두 optimizer·scheduler, tracker, Code Drift 설정을 복원합니다. 재개 시
-범위·손실·계수가 다르면 중단합니다. 최근 저장 이후의 작업은 재실행해야 합니다.
-RNG·데이터 worker 상태의 exact replay는 포함하지 않으므로 중단하지 않은 실행과
-bitwise 동일하다고 주장하지 않습니다. 신뢰하는 checkpoint만 로드합니다.
+Then, to launch a container, do:
 
-## 검사
-
-```bash
-CUDA_VISIBLE_DEVICES='' OMP_NUM_THREADS=2 MKL_NUM_THREADS=2 python -m pytest tests/test_codedrift.py tests/test_codedrift_cli.py -q
+```
+docker compose run -p 8888:8888 -p 6006:6006 dev
 ```
 
-실제 gradient, 파라미터 갱신, RVQ 동결, 원본 forward, 기본 손실 합산, CLI 저장·재개를
-CPU에서 검사합니다. 다운로드한 모델이나 GPU 본학습은 이 검사에 필요하지 않습니다.
+The port arguments (`-p`) are optional, but useful if you want to launch a Jupyter and Tensorboard instances within the container. The
+default password for Jupyter is `password`, and the current directory
+is mounted to `/u/home/src`, which also becomes the working directory.
 
-이 저장소는 **손실 구현과 학습 연결의 공유본**입니다. 기존 연구의 mixed-data sampler,
-D warm-up, 결과 CSV, 평가기 32종, W&B/Fibery 자동화와 학습 결과는 포함하지 않습니다.
-이 새 trainer가 과거 실험 전체를 그대로 재생한다고 주장하지 않습니다.
+Then, run your training command.
 
-## 출처
 
-- [Code Drift: Towards Idempotent Neural Audio Codecs, arXiv v2](https://arxiv.org/abs/2410.11025v2)
-- [High-Fidelity Audio Compression with Improved RVQGAN](https://arxiv.org/abs/2306.06546)
-- [공식 DAC 코드](https://github.com/descriptinc/descript-audio-codec)
+### Single GPU training
+```
+export CUDA_VISIBLE_DEVICES=0
+python scripts/train.py --args.load conf/ablations/baseline.yml --save_path runs/baseline/
+```
 
-공식 DAC의 MIT [LICENSE](LICENSE)를 유지합니다. 추가한 코드에도 같은 라이선스를 적용합니다.
+### Multi GPU training
+```
+export CUDA_VISIBLE_DEVICES=0,1
+torchrun --nproc_per_node gpu scripts/train.py --args.load conf/ablations/baseline.yml --save_path runs/baseline/
+```
+
+## Testing
+We provide two test scripts to test CLI + training functionality. Please
+make sure that the trainig pre-requisites are satisfied before launching these
+tests. To launch these tests please run
+```
+python -m pytest tests
+```
+
+## Results
+
+<p align="left">
+<img src="./assets/objective_comparisons.png" width=75%></p>

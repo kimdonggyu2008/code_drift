@@ -7,10 +7,11 @@
 - Original MIT license: retained verbatim in `LICENSE`.
 - Original README: retained verbatim in `README_DAC.md`.
 
-The existing `kimdonggyu2008/code_drift` repository had its own initial README
-commit. That history is retained; the official source snapshot is imported before
-the separate Code Drift changes. This is a source-based derivative, not a GitHub
-fork-network conversion or a claim of authorship of DAC.
+This repository is a GitHub fork of `descriptinc/descript-audio-codec`.
+The upstream history, initial source import, and Code Drift commits are retained.
+The earlier independent repository is preserved as
+[`code_drift-import-backup-20261031`](https://github.com/kimdonggyu2008/code_drift-import-backup-20261031).
+The main README contains the original DAC README with a short Code Drift notice.
 
 ## Changes relative to the pinned source
 
